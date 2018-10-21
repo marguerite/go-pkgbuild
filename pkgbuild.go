@@ -17,20 +17,27 @@ type Optdepends struct {
 	Desc    string
 }
 
-type pkgbuild struct {
-	pkgname     interface{}
-	pkgbase     interface{}
-	pkgver      interface{}
-	pkgrel      interface{}
-	pkgdesc     interface{}
-	url         interface{}
-	arch        interface{}
-	license     interface{}
-	makedepends interface{}
-	optdepends  interface{}
-	source      interface{}
-	sha256sums  interface{}
-	sha512sums  interface{}
+type Pkgbuild struct {
+	Pkgname      interface{}
+	Pkgbase      interface{}
+	Pkgver       interface{}
+	Pkgrel       interface{}
+	Pkgdesc      interface{}
+	Url          interface{}
+	Arch         interface{}
+	License      interface{}
+	Makedepends  interface{}
+	Optdepends   interface{}
+	Source       interface{}
+	Sha256sums   interface{}
+	Sha512sums   interface{}
+	Func_check   string
+	Func_build   string
+	Func_prepare string
+	Func_package string
+	Func_pkgver  string
+	Preamble     string
+	Macros       []string
 }
 
 func errChk(e error) {
@@ -39,23 +46,30 @@ func errChk(e error) {
 	}
 }
 
-func parse(s string) pkgbuild {
+func parse(s string) Pkgbuild {
 	_, main := splitSubPkgStr(s)
 	fmt.Println(main)
-	p := pkgbuild{}
-	p.pkgname = match("pkgname", main)
-	p.pkgbase = match("pkgbase", main)
-	p.pkgver = match("pkgver", main)
-	p.pkgrel = match("pkgrel", main)
-	p.pkgdesc = match("pkgdesc", main)
-	p.url = match("url", main)
-	p.arch = match("arch", main)
-	p.license = match("license", main)
-	p.makedepends = match("makedepends", main)
-	p.optdepends = match("optdepends", main)
-	p.source = match("source", main)
-	p.sha256sums = match("sha256sums", main)
-	p.sha512sums = match("sha512sums", main)
+	p := Pkgbuild{}
+	p.Pkgname = match("pkgname", main)
+	p.Pkgbase = match("pkgbase", main)
+	p.Pkgver = match("pkgver", main)
+	p.Pkgrel = match("pkgrel", main)
+	p.Pkgdesc = match("pkgdesc", main)
+	p.Url = match("url", main)
+	p.Arch = match("arch", main)
+	p.License = match("license", main)
+	p.Makedepends = match("makedepends", main)
+	p.Optdepends = match("optdepends", main)
+	p.Source = match("source", main)
+	p.Sha256sums = match("sha256sums", main)
+	p.Sha512sums = match("sha512sums", main)
+	p.Func_prepare = matchFunc("prepare", main)
+	p.Func_build = matchFunc("build", main)
+	p.Func_check = matchFunc("check", main)
+	p.Func_package = matchFunc("package", main)
+	p.Func_pkgver = matchFunc("pkgver", main)
+	p.Preamble = matchPreamble(main)
+	p.Macros = matchMacros(main)
 	return p
 }
 
@@ -76,44 +90,58 @@ func splitSubPkgStr(s string) (sub []string, main string) {
 	return sub, main
 }
 
-func findTagText(t, s string) string {
+func filter(t string, s string, fn bool) string {
 	// golang's regexp has no negative lookahead, so we have to parse string line by line
-	text := ""
-	begin := 0
-	end := 0
-	strs := strings.Split(s, "\n")
-	begin_r := regexp.MustCompile(`^(\s+)?` + regexp.QuoteMeta(t) + `=`)
-	end_r := regexp.MustCompile(`^(\s+)?(\s+$|\w+(=|\())`)
+	lines := strings.Split(s, "\n")
+	// subtext holder, begin pos, end pos
+	st, bp, ep := "", 0, 0
+	// begin pos regex, end pos regex
+	var br *regexp.Regexp
+	var er *regexp.Regexp
+
+	if fn {
+		br = regexp.MustCompile(`^` + regexp.QuoteMeta(t) + `\(\)\s*{`)
+		er = regexp.MustCompile(`^}$`)
+	} else {
+		br = regexp.MustCompile(`^\s*` + regexp.QuoteMeta(t) + `=`)
+		er = regexp.MustCompile(`^\s*($|\w+(=|\())`)
+	}
+
 	// loop once to find the begin pos
-	for i, j := range strs {
-		if begin_r.MatchString(j) {
-			begin = i
+	for i, j := range lines {
+		if br.MatchString(j) {
+			if fn {
+				// pkgbuild function don't need the first line eg "build() {" as subtext
+				bp = i + 1
+			} else {
+				bp = i
+			}
 			break
 		}
 	}
 	// early return if no begin pos (no such tag)
-	if begin == 0 {
-		return text
+	if bp == 0 {
+		return st
 	}
 	// loop again to find the end pos
-	for m, n := range strs {
-		if m <= begin {
+	for m, n := range lines {
+		if m <= bp {
 			continue
 		}
-		if end_r.MatchString(n) {
-			end = m - 1
+		if er.MatchString(n) {
+			ep = m - 1
 			break
 		}
 	}
 	// loop the third time to find the real text
-	for k := begin; k <= end; k++ {
-		if k == end {
-			text += strs[k]
+	for k := bp; k <= ep; k++ {
+		if k == ep {
+			st += lines[k]
 			break
 		}
-		text += strs[k] + "\n"
+		st += lines[k] + "\n"
 	}
-	return text
+	return st
 }
 
 func match(t, s string) interface{} {
@@ -121,7 +149,7 @@ func match(t, s string) interface{} {
 	if len(s) == 0 {
 		return ""
 	}
-	text := findTagText(t, s)
+	text := filter(t, s, false)
 	// return reasonable value if no such tag
 	if len(text) == 0 {
 		return ""
@@ -175,33 +203,55 @@ func match(t, s string) interface{} {
 	// now deal with the multi quots condition
 	if quot_n > 1 {
 		matched := quot_r.FindAllStringSubmatch(m, -1)
-    if colon_r.MatchString(matched[0][3]) {
-      var res []Optdepends
-	    for _, i := range matched {
-			  m := colon_r.FindStringSubmatch(i[3])
-			  res = append(res, Optdepends{m[1], m[2]})
-		  }
-		  return res
-    } else {
-      var res []string
-      for _, i := range matched {
-        res = append(res, i[3])
-      }
-      return res
-    }
+		if colon_r.MatchString(matched[0][3]) {
+			var res []Optdepends
+			for _, i := range matched {
+				m := colon_r.FindStringSubmatch(i[3])
+				res = append(res, Optdepends{m[1], m[2]})
+			}
+			return res
+		} else {
+			var res []string
+			for _, i := range matched {
+				res = append(res, i[3])
+			}
+			return res
+		}
 	}
 
-  // now deal with the multi whitespace condition
-  whitespace_r := regexp.MustCompile(`\s+`)
-  if whitespace_r.MatchString(m) {
-    return strings.Split(m," ")
-  }
+	// now deal with the multi whitespace condition
+	whitespace_r := regexp.MustCompile(`\s+`)
+	if whitespace_r.MatchString(m) {
+		return strings.Split(m, " ")
+	}
 
 	return m
 }
 
-func matchPkgName(s string) interface{} {
-	return match("pkgname", s)
+func matchPreamble(s string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	preamble := ""
+	for _, v := range lines {
+		if strings.HasPrefix(v, "#") {
+			preamble += v + "\n"
+		}
+	}
+	return preamble
+}
+
+func matchMacros(s string) []string {
+
+}
+
+func matchFunc(t, s string) string {
+	// return reasonable value if zero-length text provided
+	if len(s) == 0 {
+		return ""
+	}
+	return filter(t, s, true)
 }
 
 func main() {
